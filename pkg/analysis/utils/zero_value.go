@@ -77,6 +77,10 @@ func isSelectorExprZeroValueValid(pass *analysis.Pass, field *ast.Field, selecto
 		return false, false
 	}
 
+	if IsSemanticallyZeroable(typeOf) {
+		return true, true
+	}
+
 	underlying := typeOf.Underlying()
 
 	switch t := underlying.(type) {
@@ -782,4 +786,49 @@ func IsFieldOptional(field *ast.Field, markersAccess markershelper.Markers) bool
 	return fieldMarkers.Has(markers.OptionalMarker) ||
 		fieldMarkers.Has(markers.KubebuilderOptionalMarker) ||
 		fieldMarkers.Has(markers.K8sOptionalMarker)
+}
+
+// IsSemanticallyZeroable determines if a type safely handles omitzero
+// without requiring a pointer wrapper.
+func IsSemanticallyZeroable(t types.Type) bool {
+	// 1. Hardcoded semantic exception for Kubernetes LocalObjectReference
+	if isLocalObjectReference(t) {
+		return true
+	}
+
+	// 2. Check for IsZero() bool on the pointer receiver (*T)
+	// In Go, the method set of *T is a superset of T's method set, so this
+	// efficiently covers both pointer and value receivers.
+	ptr := types.NewPointer(t)
+	return hasIsZeroMethod(ptr)
+}
+
+func isLocalObjectReference(t types.Type) bool {
+	named, ok := t.(*types.Named)
+	if !ok {
+		return false
+	}
+
+	obj := named.Obj()
+	if obj != nil && obj.Pkg() != nil {
+		return obj.Pkg().Path() == "k8s.io/api/core/v1" && obj.Name() == "LocalObjectReference"
+	}
+	return false
+}
+
+func hasIsZeroMethod(t types.Type) bool {
+	methodSet := types.NewMethodSet(t)
+	for i := 0; i < methodSet.Len(); i++ {
+		m := methodSet.At(i).Obj()
+		if m.Name() == "IsZero" {
+			sig, ok := m.Type().(*types.Signature)
+			// Ensure it has 0 parameters and exactly 1 boolean return
+			if ok && sig.Params().Len() == 0 && sig.Results().Len() == 1 {
+				if basic, ok := sig.Results().At(0).Type().(*types.Basic); ok && basic.Kind() == types.Bool {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
